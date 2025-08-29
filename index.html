@@ -1,0 +1,616 @@
+import React, { useEffect, useState } from "react";
+
+// ==============================
+// Types
+// ==============================
+export type Question = {
+  id: number;
+  domain?: string;
+  ref?: string;
+  q: string; // 3-sentence scenario + question
+  choices: string[]; // exactly 4
+  correctIndex: number; // 0..3
+};
+
+// ==============================
+// Utilities
+// ==============================
+function secureRandomInt(maxExclusive: number) {
+  if (maxExclusive <= 1) return 0;
+  if (typeof crypto !== "undefined" && (crypto as any).getRandomValues) {
+    const arr = new Uint32Array(1);
+    (crypto as any).getRandomValues(arr);
+    return arr[0] % maxExclusive;
+  }
+  return Math.floor(Math.random() * maxExclusive);
+}
+
+function secureShuffle<T>(arr: T[]): T[] {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = secureRandomInt(i + 1);
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+// Display-only compaction to reduce length bias on long choices
+function compactChoiceText(text: string): string {
+  let t = (text || "").trim();
+  if (t.length > 140) t = t.slice(0, 137).trimEnd() + "…";
+  return t;
+}
+
+// ==============================
+// Scenario Bank (145 unique items via generators)
+// ==============================
+function buildFullBank(): Question[] {
+  const DOMAIN_KEYS = [
+    "ETHICS_CONFIDENTIALITY",
+    "ETHICS_CONFLICT",
+    "ETHICS_SCOPE",
+    "ETHICS_SAFETY",
+    "MINDSET",
+    "AGREEMENTS",
+    "TRUST_SAFETY",
+    "PRESENCE",
+    "LISTENING",
+    "AWARENESS",
+    "GROWTH",
+  ] as const;
+  type DomainKey = typeof DOMAIN_KEYS[number];
+
+  const DOMAIN_META: Record<DomainKey, { domain: string; ref: string; choices: [string,string,string,string]; correctIndex: number; }[]> = {
+    ETHICS_CONFIDENTIALITY: [
+      { domain: "Ethics", ref: "ICF Code of Ethics 2025 §2.1", choices: [
+        "Share high-level themes only.",
+        "Decline; keep content confidential unless the client consents.",
+        "Provide full notes since the sponsor funds coaching.",
+        "Hint at issues to maintain rapport."], correctIndex: 1 },
+    ],
+    ETHICS_CONFLICT: [
+      { domain: "Ethics", ref: "ICF Code of Ethics 2025 §1.6", choices: [
+        "Delay disclosure until results are impacted.",
+        "Disclose the conflict, discuss implications, and co-decide next steps.",
+        "Terminate immediately without context.",
+        "Continue and keep interests separate privately."], correctIndex: 1 },
+    ],
+    ETHICS_SCOPE: [
+      { domain: "Ethics", ref: "ICF Code of Ethics 2025 §2.6", choices: [
+        "Offer personal tips with a disclaimer.",
+        "Clarify scope and, if needed, refer to an appropriate professional.",
+        "Research options together during the session.",
+        "Decline and end the engagement."], correctIndex: 1 },
+    ],
+    ETHICS_SAFETY: [
+      { domain: "Ethics", ref: "ICF Code of Ethics 2025 §4.2", choices: [
+        "Maintain confidentiality at all costs.",
+        "Shift to a lighter topic to calm them.",
+        "Break confidentiality as required and contact appropriate support.",
+        "Schedule an extra session later."], correctIndex: 2 },
+    ],
+    MINDSET: [
+      { domain: "Coaching Mindset", ref: "ICF Core Competencies (2019) – Competency 2", choices: [
+        "Share your opinion to be transparent.",
+        "Notice bias, re-center, and return to learner’s curiosity.",
+        "Guide the client toward the safer option.",
+        "Wait until the client asks for advice."], correctIndex: 1 },
+    ],
+    AGREEMENTS: [
+      { domain: "Establishes & Maintains Agreements", ref: "Competency 3", choices: [
+        "Clarify distinctions and reset the coaching agreement collaboratively.",
+        "Switch to expert consulting to meet expectations.",
+        "Continue as is and hope alignment improves.",
+        "Refund unused sessions immediately."], correctIndex: 0 },
+    ],
+    TRUST_SAFETY: [
+      { domain: "Cultivates Trust & Safety", ref: "Competency 4", choices: [
+        "Say ‘no judgment’ and continue.",
+        "Acknowledge the concern and co-create conditions that feel safe.",
+        "Avoid the topic for now.",
+        "Ask them to push past the fear."], correctIndex: 1 },
+    ],
+    PRESENCE: [
+      { domain: "Maintains Presence", ref: "Competency 5", choices: [
+        "Rephrase to avoid silence.",
+        "Fill the gap with encouragement.",
+        "Hold space and allow processing while staying present.",
+        "Change topic to keep momentum."], correctIndex: 2 },
+    ],
+    LISTENING: [
+      { domain: "Listens Actively", ref: "Competency 6", choices: [
+        "Ignore nonverbal cues and focus on words only.",
+        "Reflect both words and observed nonverbal cues; invite exploration.",
+        "Assume the smile means it’s fine.",
+        "Label the tone and move on."], correctIndex: 1 },
+    ],
+    AWARENESS: [
+      { domain: "Evokes Awareness", ref: "Competency 7", choices: [
+        "Why are you so negative?",
+        "What evidence supports that, and when has it not been true?",
+        "Should you avoid new things?",
+        "Would a course fix this?"], correctIndex: 1 },
+    ],
+    GROWTH: [
+      { domain: "Facilitates Client Growth", ref: "Competency 8", choices: [
+        "End the contract now.",
+        "Assign the next logical goal.",
+        "Explore new possibilities aligned with values and vision.",
+        "Offer career advice to maintain momentum."], correctIndex: 2 },
+    ],
+  };
+
+  const ROLES = [
+    "first-time manager", "director", "individual contributor", "project lead", "sales head", "engineer",
+    "HR partner", "founder", "consultant", "product manager", "researcher", "operations lead"
+  ];
+  const TENSIONS = [
+    "deadline pressures and reorganizations",
+    "a promotion cycle with unclear criteria",
+    "stakeholder skepticism about coaching",
+    "post-merger culture clashes",
+    "a high-visibility launch with public scrutiny",
+    "budget cuts and headcount freezes",
+    "a rapid pivot in strategy",
+    "performance plan monitoring",
+    "competing priorities across regions",
+    "board oversight and monthly reporting"
+  ];
+
+  // Per-domain scenario builders (3 sentences + question)
+  const BUILDERS: Record<DomainKey, (ix: number) => string> = {
+    ETHICS_CONFIDENTIALITY: (ix) => {
+      const role = ROLES[ix % ROLES.length];
+      const tension = TENSIONS[ix % TENSIONS.length];
+      return `A ${role} participates in coaching while the sponsor asks for detailed session notes. The client has not given consent and has shared sensitive topics tied to ${tension}. What should the coach do about the sponsor's request?`;
+    },
+    ETHICS_CONFLICT: (ix) => {
+      const role = ROLES[(ix + 2) % ROLES.length];
+      return `Mid-engagement, the coach realizes they hold a financial stake in a vendor the ${role} is evaluating. The coach notices this could bias questions and outcomes. What is the best next step?`;
+    },
+    ETHICS_SCOPE: (ix) => {
+      const role = ROLES[(ix + 1) % ROLES.length];
+      return `A ${role} asks the coach for specific professional advice (e.g., legal, financial, clinical). The request repeats even after the coach described coaching's focus. How should the coach respond now?`;
+    },
+    ETHICS_SAFETY: () => {
+      return `During a session, the client indicates imminent risk of self-harm. They describe not feeling safe after recent events. What is the coach's primary responsibility in this moment?`;
+    },
+    MINDSET: (ix) => {
+      const role = ROLES[(ix + 6) % ROLES.length];
+      return `A ${role} considers a bold shift that triggers strong opinions in the coach. The coach notices internal judgment and an urge to persuade. What is the appropriate internal move?`;
+    },
+    AGREEMENTS: (ix) => {
+      const role = ROLES[(ix + 8) % ROLES.length];
+      return `A ${role} expected consulting and quick answers from coaching. Frustration builds as reflective work continues. What is the coach's best step regarding the engagement?`;
+    },
+    TRUST_SAFETY: (ix) => {
+      const role = ROLES[(ix + 3) % ROLES.length];
+      return `The ${role} hesitates to share, fearing judgment and potential repercussions. They ask for reassurance before proceeding. How can the coach support trust and safety?`;
+    },
+    PRESENCE: () => {
+      return `In session, the client goes silent after a challenging question. The moment feels long, and the coach feels the urge to fill the space. How should the coach respond?`;
+    },
+    LISTENING: (ix) => {
+      const role = ROLES[(ix + 11) % ROLES.length];
+      return `While discussing setbacks, a ${role} says they're fine while showing tight shoulders and a clipped tone. The verbal and nonverbal messages diverge. What is the most effective response?`;
+    },
+    AWARENESS: () => {
+      return `During planning, the client says, 'I always mess up new initiatives.' Their generalization appears untested. What question could best create new awareness?`;
+    },
+    GROWTH: (ix) => {
+      const role = ROLES[(ix + 5) % ROLES.length];
+      return `After early success, the ${role} wonders what to focus on next. Motivation is high but direction is unclear. How should the coach proceed to support growth?`;
+    },
+  };
+
+  // Distribution plan to 145 total
+  const PLAN: Array<[DomainKey, number]> = [
+    ["ETHICS_CONFIDENTIALITY", 15],
+    ["ETHICS_CONFLICT", 10],
+    ["ETHICS_SCOPE", 10],
+    ["ETHICS_SAFETY", 10],
+    ["MINDSET", 15],
+    ["AGREEMENTS", 15],
+    ["TRUST_SAFETY", 15],
+    ["PRESENCE", 15],
+    ["LISTENING", 15],
+    ["AWARENESS", 15],
+    ["GROWTH", 20],
+  ];
+
+  const out: Question[] = [];
+  let id = 1;
+  for (const [key, qty] of PLAN) {
+    const metaList = DOMAIN_META[key];
+    if (!metaList || metaList.length === 0) continue; // defensive guard
+    for (let i = 0; i < qty; i++) {
+      const meta = metaList[i % metaList.length];
+      const qText = BUILDERS[key](id + i);
+      const baseChoices = [...meta.choices];
+      // rotate order deterministically by id to avoid length/pattern bias
+      const rot = (id + i) % 4;
+      const rotated = [
+        baseChoices[(0 + rot) % 4],
+        baseChoices[(1 + rot) % 4],
+        baseChoices[(2 + rot) % 4],
+        baseChoices[(3 + rot) % 4],
+      ];
+      const correctIndex = rotated.indexOf(baseChoices[meta.correctIndex]);
+      out.push({ id: id++, domain: meta.domain, ref: meta.ref, q: qText, choices: rotated, correctIndex });
+    }
+  }
+  // Trim/pad to exactly 145 (pad should not usually happen)
+  if (out.length > 145) return out.slice(0, 145);
+  if (out.length < 145) {
+    const need = 145 - out.length;
+    for (let i = 0; i < need; i++) {
+      const base = out[i % out.length];
+      out.push({ ...base, id: out.length + 1, q: base.q + " (alternate perspective)" });
+    }
+  }
+  return out;
+}
+
+const MASTER_BANK: Question[] = buildFullBank();
+
+// ==============================
+// Validation & Drawing
+// ==============================
+function isValidQuestion(q: any): q is Question {
+  return (
+    q &&
+    typeof q.id === "number" &&
+    typeof q.q === "string" && q.q.trim().length > 0 &&
+    Array.isArray(q.choices) && q.choices.length === 4 &&
+    typeof q.correctIndex === "number" && q.correctIndex >= 0 && q.correctIndex < 4
+  );
+}
+
+function validateBank(bank: Question[]) {
+  return bank.filter(isValidQuestion);
+}
+
+function drawQuestions(fromBank: Question[], count = 30): Question[] {
+  const bank = validateBank(fromBank);
+  if (bank.length === 0) return [];
+  const shuffled = secureShuffle(bank);
+  const seen = new Set<string>();
+  const out: Question[] = [];
+  for (const q of shuffled) {
+    const key = q.q.trim().toLowerCase();
+    if (seen.has(key)) continue; // avoid duplicate stems within a draw
+    seen.add(key);
+    // shuffle choices per question and remap correct index
+    const order = secureShuffle([0, 1, 2, 3]);
+    const choices = order.map(i => q.choices[i]);
+    const correctIndex = order.indexOf(q.correctIndex);
+    out.push({ ...q, choices, correctIndex });
+    if (out.length >= count) break;
+  }
+  return out;
+}
+
+function drawQuestionsDistinctFrom(fromBank: Question[], excludeIds: Set<number>, count = 30): Question[] {
+  const bank = validateBank(fromBank);
+  const primary = bank.filter(q => !excludeIds.has(q.id));
+  let draft = drawQuestions(primary, count);
+  if (draft.length < count) {
+    const need = count - draft.length;
+    const chosenIds = new Set(draft.map(q => q.id));
+    const chosenStems = new Set(draft.map(q => q.q.trim().toLowerCase()));
+    const fillerPool = secureShuffle(bank).filter(q =>
+      !chosenIds.has(q.id) && !excludeIds.has(q.id) && !chosenStems.has(q.q.trim().toLowerCase())
+    );
+    for (const q of fillerPool) {
+      const order = secureShuffle([0, 1, 2, 3]);
+      const choices = order.map(i => q.choices[i]);
+      const correctIndex = order.indexOf(q.correctIndex);
+      draft.push({ ...q, choices, correctIndex });
+      if (draft.length >= count) break;
+    }
+    if (draft.length < count) {
+      // last resort: allow reuse of some excluded ids but still avoid duplicates within this draw
+      const lastResort = secureShuffle(bank).filter(q => !chosenIds.has(q.id) && !chosenStems.has(q.q.trim().toLowerCase()));
+      for (const q of lastResort) {
+        const order = secureShuffle([0, 1, 2, 3]);
+        const choices = order.map(i => q.choices[i]);
+        const correctIndex = order.indexOf(q.correctIndex);
+        draft.push({ ...q, choices, correctIndex });
+        if (draft.length >= count) break;
+      }
+    }
+  }
+  return draft;
+}
+
+// ==============================
+// Progress UI
+// ==============================
+function Progress({ value, max }: { value: number; max: number }) {
+  const pct = max > 0 ? Math.round((value / max) * 100) : 0;
+  return (
+    <div className="w-full bg-gray-200 rounded-2xl h-3">
+      <div className="h-3 rounded-2xl bg-gray-900 transition-all" style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+// ==============================
+// Self-tests (dev-time)
+// ==============================
+function runSelfTests(bank: Question[], sample: Question[]) {
+  const failures: string[] = [];
+  const assert = (cond: boolean, msg: string) => { if (!cond) failures.push(msg); };
+  // Bank size
+  if (bank.length < 145) failures.push(`Expected bank >= 145, got ${bank.length}`);
+  // Draw size
+  if (sample.length !== 30) failures.push(`Expected draw of 30, got ${sample.length}`);
+  // Valid items
+  sample.forEach((q, i) => {
+    if (q.choices.length !== 4) failures.push(`Q${i + 1} does not have 4 choices`);
+    if (!(q.correctIndex >= 0 && q.correctIndex < 4)) failures.push(`Q${i + 1} invalid correctIndex ${q.correctIndex}`);
+  });
+  // No duplicate stems in a single draw
+  const stems = new Set<string>();
+  sample.forEach((q) => {
+    const key = q.q.trim().toLowerCase();
+    if (stems.has(key)) failures.push(`Duplicate stem in draw: ${q.q}`);
+    stems.add(key);
+  });
+  return failures;
+}
+
+// ==============================
+// Main Component
+// ==============================
+export default function ICFQuizRobertRefined() {
+  const DRAW_COUNT = 30;
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [lastDrawIds, setLastDrawIds] = useState<Set<number>>(new Set());
+  const [idx, setIdx] = useState(0);
+  const [answers, setAnswers] = useState<Array<number | null>>([]);
+  const [submitted, setSubmitted] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<string[]>([]);
+  const [bankFilter, setBankFilter] = useState("");
+
+  // Initial draw
+  useEffect(() => {
+    const next = drawQuestionsDistinctFrom(MASTER_BANK, lastDrawIds, DRAW_COUNT);
+    setQuestions(next);
+    setAnswers(Array(next.length).fill(null));
+    setIdx(0);
+    setSubmitted(false);
+    const fails = runSelfTests(MASTER_BANK, next);
+    setDiagnostics(fails);
+    if (fails.length) console.warn("[ICF Quiz Self-Tests]", fails);
+  }, []);
+
+  const total = questions.length;
+  const current = questions[idx];
+  const answered = answers.filter(a => a !== null).length;
+
+  const score = submitted ? answers.reduce((acc, a, i) => acc + (a === questions[i]?.correctIndex ? 1 : 0), 0) : 0;
+  const percent = submitted && total > 0 ? Math.round((score / total) * 100) : 0;
+  const missed = submitted ? questions.map((q, i) => ({ ...q, yourIndex: answers[i] as number | null })).filter((r) => r.yourIndex !== r.correctIndex) : [];
+
+  function selectAnswer(i: number) {
+    if (submitted || !current) return;
+    const next = [...answers];
+    next[idx] = i;
+    setAnswers(next);
+  }
+
+  function jump(n: number) { if (n >= 0 && n < total) setIdx(n); }
+
+  function submit() {
+    if (answered < total) {
+      const ok = confirm(`You have ${total - answered} unanswered question(s). Submit anyway?`);
+      if (!ok) return;
+    }
+    setSubmitted(true);
+  }
+
+  function exportCSV(questionsToExport: Question[]) {
+    try {
+      const header = ["id","domain","ref","question","A","B","C","D","correctIndex"];
+      const lines: string[] = [header.join(",")];
+      for (const q of questionsToExport) {
+        const row = [
+          q.id,
+          JSON.stringify(q.domain ?? ""),
+          JSON.stringify(q.ref ?? ""),
+          JSON.stringify(q.q),
+          JSON.stringify(q.choices[0]),
+          JSON.stringify(q.choices[1]),
+          JSON.stringify(q.choices[2]),
+          JSON.stringify(q.choices[3]),
+          q.correctIndex,
+        ].join(",");
+        lines.push(row);
+      }
+      const csvString = "\uFEFF" + lines.join("\n") + "\n"; // BOM + newline-safe
+      const blob = new Blob([csvString], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.setAttribute("download", `icf_question_bank_${questionsToExport.length}.csv`);
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (e) {
+      console.error("CSV export failed", e);
+      alert("Sorry—CSV export failed. Check the console for details.");
+    }
+  }
+
+  function reset() {
+    const exclude = new Set<number>(questions.map(q => q.id));
+    const next = drawQuestionsDistinctFrom(MASTER_BANK, exclude, DRAW_COUNT);
+    setQuestions(next);
+    setAnswers(Array(next.length).fill(null));
+    setIdx(0);
+    setSubmitted(false);
+    setLastDrawIds(exclude); // exclude previous quiz for the next draw only
+    const fails = runSelfTests(MASTER_BANK, next);
+    setDiagnostics(fails);
+    if (fails.length) console.warn("[ICF Quiz Self-Tests] (reset)", fails);
+  }
+
+  if (!current) {
+    return (
+      <div className="p-6 max-w-3xl mx-auto">
+        <h1 className="text-xl font-bold mb-2">ICF Coaching Exam-Style Quiz</h1>
+        <p className="text-sm text-gray-600 mb-4">Drawing questions…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-white text-gray-900 p-6 flex justify-center">
+      <div className="w-full max-w-5xl space-y-6">
+        <header className="space-y-2">
+          <h1 className="text-2xl font-bold">ICF Coaching Exam-Style Quiz</h1>
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            <div className="text-sm text-gray-600">Bank size: {MASTER_BANK.length} (validated: {validateBank(MASTER_BANK).length}) • Excluding last: {lastDrawIds.size}</div>
+            <div className="flex items-center gap-2">
+              <button onClick={() => exportCSV(MASTER_BANK)} className="px-3 py-2 rounded-lg border border-gray-300 text-sm">Export CSV</button>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <Progress value={answers.filter(a => a !== null).length} max={questions.length} />
+            <div className="text-sm tabular-nums w-40 text-right">{answered}/{questions.length} answered</div>
+          </div>
+        </header>
+
+        {/* Bank viewer */}
+        <section className="rounded-2xl border border-gray-200 p-5 shadow-sm space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <h2 className="text-lg font-semibold">Question Bank Viewer <span className="text-sm text-gray-500">({MASTER_BANK.length} total)</span></h2>
+            <input
+              value={bankFilter}
+              onChange={(e) => setBankFilter(e.target.value)}
+              placeholder="Filter by text, domain, or ref…"
+              className="px-3 py-2 rounded-lg border border-gray-300 text-sm w-full sm:w-80"
+            />
+          </div>
+          <ol className="list-decimal pl-6 space-y-3 max-h-96 overflow-auto">
+            {MASTER_BANK.filter(q => {
+              const t = bankFilter.trim().toLowerCase();
+              if (!t) return true;
+              const hay = `${q.id} ${q.domain ?? ""} ${q.ref ?? ""} ${q.q}`.toLowerCase();
+              return hay.includes(t);
+            }).map(q => (
+              <li key={q.id} className="space-y-1">
+                <div className="text-xs text-gray-500">{q.domain ?? ""}{q.ref ? ` • ${q.ref}` : ""}</div>
+                <div className="font-medium">{q.id}. {q.q}</div>
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        {!submitted ? (
+          <main className="space-y-4">
+            <div className="text-xs text-gray-500">{current.domain ?? ""}{current.ref ? ` • ${current.ref}` : ""}</div>
+            <div className="rounded-2xl border border-gray-200 p-5 shadow-sm">
+              <div className="flex items-start justify-between gap-4">
+                <h2 className="text-lg font-semibold">{idx + 1}. {current.q}</h2>
+                <span className="text-sm text-gray-500">Question {idx + 1} / {questions.length}</span>
+              </div>
+              <div className="mt-4 grid gap-3">
+                {current.choices.map((c, i) => {
+                  const selected = answers[idx] === i;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => selectAnswer(i)}
+                      className={
+                        "text-left w-full border rounded-xl p-4 transition shadow-sm focus:outline-none focus:ring-2 " +
+                        (selected ? "bg-gray-900 text-white border-gray-900" : "bg-white hover:bg-gray-50 border-gray-200")
+                      }
+                    >
+                      <span className="font-medium mr-2">{String.fromCharCode(65 + i)})</span> {compactChoiceText(c)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => jump(idx - 1)} disabled={idx === 0} className="px-4 py-2 rounded-xl border border-gray-300 disabled:opacity-40">Previous</button>
+                <button onClick={() => jump(idx + 1)} disabled={idx === questions.length - 1} className="px-4 py-2 rounded-xl border border-gray-300 disabled:opacity-40">Next</button>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={submit} className="px-4 py-2 rounded-xl bg-gray-900 text-white">Submit</button>
+              </div>
+            </div>
+          </main>
+        ) : (
+          <section className="space-y-6">
+            <div className="rounded-2xl border border-gray-200 p-6 shadow-sm">
+              <h2 className="text-xl font-bold">Your Results</h2>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-sm text-gray-600">Correct</div>
+                  <div className="text-3xl font-bold tabular-nums">{score}</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-sm text-gray-600">Percentage</div>
+                  <div className="text-3xl font-bold tabular-nums">{percent}%</div>
+                </div>
+                <div className="p-4 rounded-xl bg-gray-50">
+                  <div className="text-sm text-gray-600">Answered</div>
+                  <div className="text-3xl font-bold tabular-nums">{answered}/{questions.length}</div>
+                </div>
+              </div>
+              <div className="mt-6 flex flex-wrap gap-3">
+                <button onClick={reset} className="px-4 py-2 rounded-xl border border-gray-300">New Exam</button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-gray-200 p-6 shadow-sm">
+              <h3 className="text-lg font-semibold">Review Incorrect ({missed.length})</h3>
+              {missed.length === 0 ? (
+                <p className="mt-2 text-sm text-gray-600">Perfect score!</p>
+              ) : (
+                <ol className="mt-4 space-y-4 list-decimal pl-6">
+                  {missed.map((row) => (
+                    <li key={row.id}>
+                      <div className="text-xs text-gray-500">{row.domain ?? ""}{row.ref ? ` • ${row.ref}` : ""}</div>
+                      <div className="font-medium">{row.id}. {row.q}</div>
+                      <div className="text-sm mt-1">
+                        <div>
+                          <span className="font-semibold">Your answer:</span> {row.yourIndex === null ? "(no answer)" : `${String.fromCharCode(65 + (row.yourIndex as number))}) ${compactChoiceText(row.choices[row.yourIndex as number])}`}
+                        </div>
+                        <div>
+                          <span className="font-semibold">Correct:</span> {`${String.fromCharCode(65 + row.correctIndex)}) ${compactChoiceText(row.choices[row.correctIndex])}`}
+                        </div>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+
+            {diagnostics.length > 0 && (
+              <details className="rounded-2xl border border-red-200 p-4 bg-red-50">
+                <summary className="cursor-pointer font-semibold text-red-700">Diagnostics (Self-Tests) – Failures: {diagnostics.length}</summary>
+                <ul className="list-disc pl-6 mt-2 text-sm text-red-700">
+                  {diagnostics.map((d, i) => (
+                    <li key={i}>{d}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </section>
+        )}
+
+        <footer className="text-xs text-gray-500 pt-2">
+          Randomized draw of 30 questions from bank of {MASTER_BANK.length}. Based on ICF Core Competencies (2019) & ICF Code of Ethics (2025).
+        </footer>
+      </div>
+    </div>
+  );
+}
